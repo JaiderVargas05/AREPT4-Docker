@@ -17,6 +17,13 @@
         <artifactId>spring-boot-starter-web</artifactId>
         <version>3.3.7</version>
         </dependency>
+                <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
+            <type>jar</type>
+        </dependency>
     </dependencies>
     <!-- build configuration -->
     <build>

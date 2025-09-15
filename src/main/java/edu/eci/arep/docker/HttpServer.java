@@ -117,11 +117,6 @@ public class HttpServer {
             ? fileName.replaceFirst("^/", "")
             : (staticResourceFolder + "/" + fileName.replaceFirst("^/", ""));
 
-    // Logs útiles para depurar (puedes quitarlos luego)
-    System.out.println("[STATIC] user.dir=" + System.getProperty("user.dir"));
-    System.out.println("[STATIC] classpath=" + System.getProperty("java.class.path"));
-    System.out.println("[STATIC] resourcePath=" + resourcePath);
-
     InputStream is = null;
     ClassLoader cl = Thread.currentThread().getContextClassLoader();
     if (cl == null) cl = HttpServer.class.getClassLoader();
