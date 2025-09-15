@@ -4,21 +4,30 @@
  */
 package edu.eci.arep.docker;
 
+import edu.eci.arep.docker.annotations.RestController;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
-/**
- *
- * @author andrea.torres-g
- */
+
 @SpringBootApplication
 public class RestServiceApplication {
 
-public static void main(String[] args) {
-SpringApplication app = new SpringApplication(RestServiceApplication.class);
-app.setDefaultProperties(Collections.singletonMap("server.port", getPort()));
-app.run(args);
+public static void main(String[] args) throws Exception{
+        System.out.println("Running Microspringboot");
+        String base = "edu.eci.arep.docker.controller";
+        Set<Class<?>> setControllers = FindControllers.find(base, RestController.class);
+        List<Class<?>> controllers = new ArrayList<>(setControllers);
+        String[] controllerNames = new String[controllers.size()];
+        for (int i = 0; i < controllers.size(); i++) {
+            controllerNames[i] = controllers.get(i).getName();
+        }
+        HttpServer.staticfiles("static");
+        HttpServer.port(getPort());
+        HttpServer.runServer(controllerNames);
 }
 
 private static int getPort() {
