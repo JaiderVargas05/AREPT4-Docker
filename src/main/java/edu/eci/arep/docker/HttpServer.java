@@ -12,11 +12,18 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class HttpServer {
 
+    private static volatile ServerSocket serverSocket;
+    private static final AtomicBoolean running = new AtomicBoolean(true);
+    private static ExecutorService executor;
     private static final Map<String, String> mimeTypes = new HashMap<String, String>() {
         {
             put("html", "text/html");
@@ -28,71 +35,134 @@ public class HttpServer {
         }
     };
 
-    public static Map<String, Method> services = new HashMap();
+    public static Map<String, Method> services = new java.util.concurrent.ConcurrentHashMap<>();
     private static String staticResourceFolder;
 
     private static int basePort = 35000;
 
-    public static void runServer(String[] args) throws IOException, URISyntaxException, ClassNotFoundException {
-        ServerSocket serverSocket = null;
-        loadServices(args);
+    public static void runServer(String[] controllers)
+            throws IOException, URISyntaxException, ClassNotFoundException {
+
+        loadServices(controllers);
+
+        executor = Executors.newFixedThreadPool(
+                Math.max(4, Runtime.getRuntime().availableProcessors() * 4));
+
+        Runtime.getRuntime().addShutdownHook(new Thread(HttpServer::gracefulShutdown, "shutdown-hook"));
+
+        serverSocket = new ServerSocket(basePort);
+        System.out.println("Listening on port " + basePort);
+
         try {
-            serverSocket = new ServerSocket(basePort);
-        } catch (IOException e) {
-            System.err.println("Could not listen on port:" + basePort);
-            System.exit(1);
-        }
-        Socket clientSocket = null;
-
-        boolean running = true;
-        while (running) {
-            try {
-                System.out.println("Listo para recibir ...");
-                clientSocket = serverSocket.accept();
-            } catch (IOException e) {
-                System.err.println("Accept failed.");
-                System.exit(1);
-            }
-
-            OutputStream out = new BufferedOutputStream(clientSocket.getOutputStream());
-            BufferedReader in = new BufferedReader(
-                    new InputStreamReader(
-                            clientSocket.getInputStream()));
-            String inputLine, outputLine;
-
-            String path = null;
-            boolean firstline = true;
-            URI requri = null;
-
-            while ((inputLine = in.readLine()) != null) {
-                if (firstline) {
-                    requri = new URI(inputLine.split(" ")[1]);
-                    if (requri != null) {
-                        System.out.println("Path: " + requri.getPath());
-
+            while (running.get()) {
+                try {
+                    final Socket client = serverSocket.accept();
+                    client.setSoTimeout(8000);
+                    executor.submit(() -> {
+                        try {
+                            handleClient(client);
+                        } catch (Exception e) {
+                        } finally {
+                            try {
+                                client.close();
+                            } catch (IOException ignored) {
+                            }
+                        }
+                    });
+                } catch (SocketException se) {
+                    if (running.get()) {
+                        System.err.println("SocketException inesperada: " + se.getMessage());
                     }
-                    firstline = false;
-                }
-                System.out.println("Received: " + inputLine);
-                if (!in.ready()) {
                     break;
                 }
             }
+        } finally {
+            gracefulShutdown();
+        }
+    }
 
-            if (requri != null) {
-                if (requri.getPath().startsWith("/app")) {
-                    invokeService(requri, out);
-                } else {
-                    readFileService(requri, out);
+    private static void gracefulShutdown() {
+        if (!running.getAndSet(false)) {
+            return;
+        }
+        System.out.println("Shutting down gracefully...");
+        if (serverSocket != null && !serverSocket.isClosed()) {
+            try {
+                serverSocket.close();
+            } catch (IOException ignored) {
+            }
+        }
+        if (executor != null) {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                    System.out.println("Forzando cierre de tareas...");
+                    executor.shutdownNow();
+                    executor.awaitTermination(5, TimeUnit.SECONDS);
                 }
+            } catch (InterruptedException ie) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+        System.out.println("Stopped. Bye!");
+    }
 
+    private static void handleClient(Socket clientSocket) {
+        try (OutputStream out = new BufferedOutputStream(clientSocket.getOutputStream()); BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()))) {
+
+            String inputLine;
+            boolean firstline = true;
+            URI requri = null;
+
+            try {
+                while ((inputLine = in.readLine()) != null) {
+                    if (firstline) {
+                        String[] parts = inputLine.split(" ");
+                        if (parts.length >= 2) {
+                            requri = new URI(parts[1]);
+                        }
+                        firstline = false;
+                    }
+                    if (!in.ready()) {
+                        break;
+                    }
+                }
+            } catch (java.net.SocketTimeoutException te) {
+                byte[] body = "Request Timeout".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                String hdr = "HTTP/1.1 408 Request Timeout\r\n"
+                        + "Content-Type: text/plain\r\n"
+                        + "Content-Length: " + body.length + "\r\n"
+                        + "Connection: close\r\n\r\n";
+                try {
+                    out.write(hdr.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                    out.write(body);
+                    out.flush();
+                } catch (IOException ignore) {
+                }
+                return;
+            } catch (java.net.SocketException se) {
+                return;
             }
 
-            out.close();
-            in.close();
-            clientSocket.close();
+            if (requri == null) {
+                return;
+            }
+
+            if (requri.getPath().startsWith("/app")) {
+                invokeService(requri, out);
+            } else {
+                readFileService(requri, out);
+            }
+
+        } catch (Exception e) {
+            System.err.println("Client error: " + e.getClass().getSimpleName() + " - " + e.getMessage());
+        } finally {
+            try {
+                clientSocket.close();
+            } catch (IOException ignore) {
+            }
         }
-        serverSocket.close();
     }
 
     private static String getMymeType(String fileName) {
@@ -110,47 +180,51 @@ public class HttpServer {
     }
 
     private static void readFileService(URI requestUri, OutputStream out) throws IOException {
-    String fileName = requestUri.getPath();
-    if (fileName.equals("/")) fileName = "index.html";
-
-    String resourcePath = (staticResourceFolder == null || staticResourceFolder.isBlank())
-            ? fileName.replaceFirst("^/", "")
-            : (staticResourceFolder + "/" + fileName.replaceFirst("^/", ""));
-
-    InputStream is = null;
-    ClassLoader cl = Thread.currentThread().getContextClassLoader();
-    if (cl == null) cl = HttpServer.class.getClassLoader();
-
-    is = cl.getResourceAsStream(resourcePath);
-    if (is == null) {
-        is = cl.getResourceAsStream("/" + resourcePath);
-    }
-    if (is == null) {
-        Path abs = Paths.get("/usrapp/bin/classes", resourcePath).normalize();
-        if (Files.exists(abs) && !Files.isDirectory(abs)) {
-            is = Files.newInputStream(abs);
+        String fileName = requestUri.getPath();
+        if (fileName.equals("/")) {
+            fileName = "index.html";
         }
-    }
 
-    if (is == null) {
-        String bodyStr = "<h1>File not found 404</h1>";
-        String header = "HTTP/1.1 404 Not Found\r\ncontent-type: text/html\r\n\r\n";
+        String resourcePath = (staticResourceFolder == null || staticResourceFolder.isBlank())
+                ? fileName.replaceFirst("^/", "")
+                : (staticResourceFolder + "/" + fileName.replaceFirst("^/", ""));
+
+        InputStream is = null;
+        ClassLoader cl = Thread.currentThread().getContextClassLoader();
+        if (cl == null) {
+            cl = HttpServer.class.getClassLoader();
+        }
+
+        is = cl.getResourceAsStream(resourcePath);
+        if (is == null) {
+            is = cl.getResourceAsStream("/" + resourcePath);
+        }
+        if (is == null) {
+            Path abs = Paths.get("/usrapp/bin/classes", resourcePath).normalize();
+            if (Files.exists(abs) && !Files.isDirectory(abs)) {
+                is = Files.newInputStream(abs);
+            }
+        }
+
+        if (is == null) {
+            String bodyStr = "<h1>File not found 404</h1>";
+            String header = "HTTP/1.1 404 Not Found\r\ncontent-type: text/html\r\n\r\n";
+            out.write(header.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            out.write(bodyStr.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            out.flush();
+            return;
+        }
+
+        byte[] fileBytes = is.readAllBytes();
+        is.close();
+        String mime = getMymeType(resourcePath);
+        String header = "HTTP/1.1 200 OK\r\n"
+                + "Content-Type: " + mime + "\r\n"
+                + "Content-Length: " + fileBytes.length + "\r\n\r\n";
         out.write(header.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
-        out.write(bodyStr.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        out.write(fileBytes);
         out.flush();
-        return;
     }
-
-    byte[] fileBytes = is.readAllBytes();
-    is.close();
-    String mime = getMymeType(resourcePath);
-    String header = "HTTP/1.1 200 OK\r\n"
-            + "Content-Type: " + mime + "\r\n"
-            + "Content-Length: " + fileBytes.length + "\r\n\r\n";
-    out.write(header.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
-    out.write(fileBytes);
-    out.flush();
-}
 
     public static void loadServices(String args[]) {
         try {
@@ -169,9 +243,6 @@ public class HttpServer {
         }
     }
 
-//    public static void get(String path, Service s) {
-//        services.put(path, s);
-//    }
     private static void invokeService(URI requri, OutputStream out) throws IOException {
 
         HttpRequest req = new HttpRequest(requri);
